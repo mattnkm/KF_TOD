@@ -1,0 +1,720 @@
+Libraries and data
+```{r}
+library(librarian)
+shelf(sf, tidyverse, readxl, tmap, tidytransit)
+tmap_mode('view')
+getwd()
+```
+
+GTFS Data, separate transport stops and stations
+```{r}
+# read gtfs data
+syd_gtfs <- read_gtfs(file.path("./Data/Transport/full_greater_sydney_gtfs_static_0.zip"))
+
+# Extract stations and stops. Need to be done through the route and the stop ID.
+## Buses = route_type 700
+## Trains = route_type 2
+## Ferries = route_type 4
+## Light Rail = route_type 0
+## Metro = route_type 401
+
+# transport routes, stops, trips, and stop_times as separate df
+routes <- syd_gtfs$routes
+stops <- syd_gtfs$stops
+trips <- syd_gtfs$trips
+stop_times <- syd_gtfs$stop_times
+
+bus_routes <- routes %>% filter(route_type == 700)
+train_routes <- routes %>% filter(route_type == 2)
+ferry_routes <- routes %>% filter(route_type == 4)
+light_rail_routes <- routes %>% filter(route_type == 900)
+metro_routes <- routes %>% filter(route_type == 401)
+```
+
+# transport stops
+```{r}
+# train stations
+train_stations <- routes %>% 
+  filter(route_type == 2) %>% 
+  select(route_id, route_long_name) %>% 
+  left_join(trips %>% select(trip_id, route_id)) %>% 
+  left_join(stop_times %>% select(trip_id, stop_id)) %>% 
+  left_join(stops %>% select(stop_id, parent_station, stop_name, stop_lat, stop_lon)) %>% 
+  distinct(stop_id, .keep_all = TRUE) %>% 
+  select(parent_station) %>% 
+  left_join(stops, by = c("parent_station" = "stop_id")) %>% 
+  arrange(stop_name) %>% 
+  distinct(parent_station, .keep_all = TRUE) %>%  
+  rename(stop_id = parent_station) %>%
+  select(stop_id, stop_name, stop_lat, stop_lon) %>% 
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# metro stations
+metro_stations <- routes %>% 
+  filter(route_type == 401) %>%
+  select(route_id, route_long_name) %>% 
+  left_join(trips %>% select(trip_id, route_id)) %>% 
+  left_join(stop_times %>% select(trip_id, stop_id)) %>% 
+  left_join(stops %>% select(stop_id, parent_station, stop_name, stop_lat, stop_lon)) %>% 
+  distinct(stop_id, .keep_all = TRUE) %>% 
+  select(parent_station) %>% 
+  left_join(stops, by = c("parent_station" = "stop_id")) %>% 
+  arrange(stop_name) %>% 
+  distinct(parent_station, .keep_all = TRUE) %>% 
+  rename(stop_id = parent_station) %>%
+  select(stop_id, stop_name, stop_lat, stop_lon) %>% 
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# ferry stations
+ferry_stations <- routes %>% 
+  filter(route_type == 4) %>% 
+  select(route_id, route_long_name) %>% 
+  left_join(trips %>% select(trip_id, route_id)) %>% 
+  left_join(stop_times %>% select(trip_id, stop_id)) %>% 
+  left_join(stops %>% select(stop_id, parent_station, stop_name, stop_lat, stop_lon)) %>% 
+  distinct(stop_id, .keep_all = TRUE) %>%
+  select(parent_station) %>%
+  left_join(stops, by = c("parent_station" = "stop_id")) %>% 
+  arrange(stop_name) %>%
+  distinct(parent_station, .keep_all = TRUE) %>% 
+  rename(stop_id = parent_station) %>%
+  select(stop_id, stop_name, stop_lat, stop_lon) %>%
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# bus stops
+bus_stops <- routes %>% 
+  filter(route_type == 700) %>%
+  select(route_id, route_long_name) %>% 
+  left_join(trips %>% select(trip_id, route_id)) %>% 
+  left_join(stop_times %>% select(trip_id, stop_id)) %>% 
+  left_join(stops %>% select(stop_id, parent_station, stop_name, stop_lat, stop_lon)) %>% 
+  distinct(stop_id, .keep_all = TRUE) %>% 
+  select(stop_id, stop_name, stop_lat, stop_lon) %>% 
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326) 
+
+# light rail stops
+lightrail_stops <- routes %>% 
+  filter(route_type == 900) %>%
+  select(route_id, route_long_name) %>% 
+  left_join(trips %>% select(trip_id, route_id)) %>% 
+  left_join(stop_times %>% select(trip_id, stop_id)) %>% 
+  left_join(stops %>% select(stop_id, parent_station, stop_name, stop_lat, stop_lon)) %>% 
+  distinct(stop_id, .keep_all = TRUE) %>% 
+  select(parent_station) %>%
+  left_join(stops, by = c("parent_station" = "stop_id")) %>%
+  arrange(stop_name) %>% 
+  distinct(parent_station, .keep_all = TRUE) %>% 
+  rename(stop_id = parent_station) %>%
+  select(stop_id, stop_name, stop_lat, stop_lon) %>% 
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326)
+```
+
+
+# priority areas and wicks road south
+```{r}
+# identify priority areas based on NSW DPE TOD Programme.
+# 8 priority areas: Bankstown, Bays West, Bella Vista, Crows Nest, Homebush, Hornsby, Kellyville, Macquarie Park. Crows Nest and Bays West are not in GTFS as they have not been built
+priority_areas <- stops %>% 
+  filter(str_detect(stop_name, "Bankstown") | 
+           str_detect(stop_name, "Bays West") | 
+           str_detect(stop_name, "Bella Vista") | 
+           str_detect(stop_name, "Crows Nest") | 
+           str_detect(stop_name, "Homebush") | 
+           str_detect(stop_name, "Hornsby") | 
+           str_detect(stop_name, "Kellyville") | 
+           str_detect(stop_name, "Macquarie Park"),
+         stop_code == "") %>% 
+  # filter our main stops (starts with 2)
+  filter(str_detect(stop_id, "^2")) %>% 
+  select(stop_id, stop_name, stop_lat, stop_lon) %>%
+  arrange(stop_name) %>%
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# wicks road south, create data point at coords = -33.79116493061005, 151.1328615310194, name wicks_rd_south
+wicks_rd <- data.frame(stop_id = "1", 
+                       stop_name = "Wicks Road South", 
+                       stop_lat = -33.79116493061005, 
+                       stop_lon = 151.1328615310194) %>% 
+  st_as_sf(coords = c("stop_lon", "stop_lat"), crs = 4326)
+
+# join priority areas and wicks road south
+priority_zones <- rbind(priority_areas, wicks_rd) %>% 
+  rename(id = stop_id,
+         name = stop_name)
+
+# clear environment, except stops and priority zones
+rm(list = setdiff(ls(), c("priority_zones", "bus_stops", "train_stations", "ferry_stations", "metro_stations", "lightrail_stops")))
+gc()
+```
+
+# ABS data
+```{r}
+# Read all xlsx files in folder as dataframes and rename with file name
+data <- list.files(pattern = "\\.xlsx$", path = "./Data/Census", full.names = TRUE)
+data <- lapply(data, read_xlsx)
+names(data) <- gsub(".xlsx", "", list.files(pattern = "\\.xlsx$", path = "./Data/Census"))
+
+# Current Transport Mode
+abs_transmode <- data$KF_TOD_TransMode
+# Housing Need
+abs_housingneed <- data$KF_TOD_HousingNeed
+# Dwelling Type
+abs_dwellingtype <- data$KF_TOD_DwellingType
+# Age
+abs_age <- data$KF_TOD_Age
+# Income
+abs_income <- data$KF_TOD_Income
+# Rents
+abs_rents <- data$KF_TOD_RentalPayments
+# Labour Force
+abs_labourforce <- data$KF_TOD_LabourForce
+# No Households
+abs_NoHouseholds <- data$KF_TOD_NoHouseholds
+# Boarding Houses
+abs_boardinghouses <- data$KF_TOD_BoardingHouses
+# Rent Stress
+abs_rentstress <- data$KF_TOD_RentStress
+# Residential Parks
+abs_resiparks <- data$KF_TOD_ResidentialParks
+# SocialHousing
+abs_socialhousing <- data$KF_TOD_SocialHousing
+# Number of cars
+abs_cars <- data$KF_TOD_NoCars
+```
+
+Calculate transport mode distribution for each SA2
+```{r}
+trans_mode <- abs_transmode %>% 
+  mutate(`Personal Vehicle` = `Car, as driver` + 
+           `Car, as passenger` + 
+           `Taxi/ride-share service` + 
+           `Motorbike/scooter`,
+         Tram = `Tram/light rail`,
+         `Active Transport` = Bicycle + `Walked only`,
+         `Work from Home` = `Worked at home`) %>% 
+  select(SA2_NAME, Train, Bus, Ferry, Tram, `Personal Vehicle`, `Active Transport`, `Work from Home`)%>% 
+  arrange(SA2_NAME) %>% 
+  #calculate percentage of each transport mode
+  mutate(Train_P = Train / rowSums(.[2:8]) * 100,
+         Bus_P = Bus / rowSums(.[2:8]) * 100,
+         Ferry_P = Ferry / rowSums(.[2:8]) * 100,
+         Tram_P = Tram / rowSums(.[2:8]) * 100,
+         `Personal.Vehicle_P` = `Personal Vehicle` / rowSums(.[2:8]) * 100,
+         `Active.Transport_P` = `Active Transport` / rowSums(.[2:8]) * 100,
+         `WfH_P` = `Work from Home` / rowSums(.[2:8]) * 100)
+```
+
+Calculate housing need distribution for each SA2
+```{r}
+housing_need <- abs_housingneed %>% 
+  rename(HN0 = "No bedrooms needed or spare",
+         HN1 = "One extra bedroom needed",
+         HN2 = "Two extra bedrooms needed",
+         HN3 = "Three extra bedrooms needed",
+         HN4 = "Four or more extra bedrooms needed") %>% 
+  arrange(SA2_NAME) %>% 
+  #calculate percentage of each housing need category
+  mutate(HN0P = HN0 / rowSums(.[2:6]) * 100,
+         HN1P = HN1 / rowSums(.[2:6]) * 100,
+         HN2P = HN2 / rowSums(.[2:6]) * 100,
+         HN3P = HN3 / rowSums(.[2:6]) * 100,
+         HN4P = HN4 / rowSums(.[2:6]) * 100) %>% 
+  select(SA2_NAME, HN0, HN0P, HN1, HN1P, HN2, HN2P, HN3, HN3P, HN4, HN4P)
+```
+Calculate dwelling type distribution for each SA2
+```{r}
+dwelling_types <- abs_dwellingtype %>% 
+  mutate(Houses = `Separate house`,
+        `Semi-detached` = `Semi-detached, row or terrace house, townhouse etc. with two or more storeys` + 
+          `Semi-detached, row or terrace house, townhouse etc. with one storey`,
+        `Low-density Apartments` = `Flat or apartment in a one or two storey block`,
+        `Medium-density Apartments` = `Flat or apartment in a three storey block` + 
+          `Flat or apartment in a four to eight storey block`,
+        `High-density Apartments` = `Flat or apartment in a nine or more storey block`) %>% 
+  select(SA2_NAME, Houses, `Semi-detached`, `Low-density Apartments`, `Medium-density Apartments`, `High-density Apartments`) %>% 
+  arrange(SA2_NAME) %>%
+  #calculate percentage of each dwelling type
+  mutate(Houses_P = Houses / rowSums(.[2:6]) * 100,
+         `Semi-detached_P` = `Semi-detached` / rowSums(.[2:6]) * 100,
+         `Low-density Apartments_P` = `Low-density Apartments` / rowSums(.[2:6]) * 100,
+         `Medium-density Apartments_P` = `Medium-density Apartments` / rowSums(.[2:6]) * 100,
+         `High-density Apartments_P` = `High-density Apartments` / rowSums(.[2:6]) * 100) %>% 
+  select(SA2_NAME, Houses, Houses_P, `Semi-detached`, `Semi-detached_P`, `Low-density Apartments`, `Low-density Apartments_P`, `Medium-density Apartments`, `Medium-density Apartments_P`, `High-density Apartments`, `High-density Apartments_P`)
+```
+
+Calculate median age in each SA2
+```{r}
+# Calculate median age in each SA2 from the abs_age data
+med_age <- abs_age %>% 
+  select(2:117)
+
+# Calculate median age in each SA2
+med_age <- apply(med_age, 1, function(x) median(rep(c(0:(length(x)-1)), x)))
+
+# Add SA2_NAME21 to the med_age data
+med_age <- as.data.frame(cbind(abs_age$`SA2_NAME`, med_age)) %>% 
+  rename(SA2_NAME = V1, `Median Age` = med_age) %>% 
+  arrange(SA2_NAME)
+```
+
+Calculate median income in each SA2
+```{r}
+# Create new column, with income low and high
+med_income <- abs_income %>% 
+  # pivot_longer to create new columns
+  pivot_longer(cols = -SA2_NAME, names_to = "Income", values_to = "Count") %>% 
+  mutate(income_low = ifelse(Income == "$1-$149 ($1-$7,799)", 1,
+                             ifelse(Income == "$150-$299 ($7,800-$15,599)", 150, 
+                                     ifelse(Income == "$300-$399 ($15,600-$20,799)", 300,
+                                            ifelse(Income == "$400-$499 ($20,800-$25,999)", 400, 
+                                                   ifelse(Income == "$500-$649 ($26,000-$33,799)", 500, 
+                                                          ifelse(Income == "$650-$799 ($33,800-$41,599)", 650, 
+                                                                 ifelse(Income == "$800-$999 ($41,600-$51,999)", 800, 
+                                                                        ifelse(Income == "$1,000-$1,249 ($52,000-$64,999)", 1000, 
+                                                                               ifelse(Income == "$1,250-$1,499 ($65,000-$77,999)", 1250, 
+                                                                                      ifelse(Income == "$1,500-$1,749 ($78,000-$90,999)", 1500, 
+                                                                                             ifelse(Income == "$1,750-$1,999 ($91,000-$103,999)", 1750, 
+                                                                                                    ifelse(Income == "$2,000-$2,999 ($104,000-$155,999)", 2000, 
+                                                                                                           ifelse(Income == "$3,000-$3,499 ($156,000-$181,999)", 3000, 
+                                                                                                                  ifelse(Income == "$3,500 or more ($182,000 or more)", 3500, 0))))))))))))))) %>% 
+  mutate(income_high = ifelse(Income == "$1-$149 ($1-$7,799)", 149,
+                             ifelse(Income == "$150-$299 ($7,800-$15,599)", 299, 
+                                     ifelse(Income == "$300-$399 ($15,600-$20,799)", 399,
+                                            ifelse(Income == "$400-$499 ($20,800-$25,999)", 499, 
+                                                   ifelse(Income == "$500-$649 ($26,000-$33,799)", 649, 
+                                                          ifelse(Income == "$650-$799 ($33,800-$41,599)", 799, 
+                                                                 ifelse(Income == "$800-$999 ($41,600-$51,999)", 999, 
+                                                                        ifelse(Income == "$1,000-$1,249 ($52,000-$64,999)", 1249, 
+                                                                               ifelse(Income == "$1,250-$1,499 ($65,000-$77,999)", 1499, 
+                                                                                      ifelse(Income == "$1,500-$1,749 ($78,000-$90,999)", 1749, 
+                                                                                             ifelse(Income == "$1,750-$1,999 ($91,000-$103,999)", 1999, 
+                                                                                                    ifelse(Income == "$2,000-$2,999 ($104,000-$155,999)", 2999, 
+                                                                                                           ifelse(Income == "$3,000-$3,499 ($156,000-$181,999)", 3499, 
+                                                                                                                  ifelse(Income == "$3,500 or more ($182,000 or more)", 5000, 0))))))))))))))) %>% 
+  mutate(income_diff = income_high - income_low) %>% 
+  filter(Income != "Negative income",
+         Income != "Not stated",
+         Income != "Not applicable",
+         Income != "Overseas visitor") %>% 
+  select(SA2_NAME, Income, income_low, income_high, income_diff, Count) %>%
+  arrange(SA2_NAME) %>% 
+  # group by SA2_NAME and calculate total as column
+  group_by(SA2_NAME) %>%
+  mutate(total = sum(Count),
+         perc = Count/total *100) %>% 
+  # get cumulative sum of perc
+  mutate(cumsum = cumsum(perc)) %>% 
+  # for each SA2_NAME, mutate new column where cumsum contains or is closest to 50
+  mutate(closest_50 = ifelse(cumsum >= 50, cumsum, NA)) %>% 
+  # mutate new column with Income from row after closest_50
+  mutate(closest_low = ifelse(lead(closest_50, 1) >= 50, cumsum, NA)) %>% 
+  # for each suburb, slice first two rows after NA in closest_low
+  filter(!is.na(closest_low)) %>% 
+  slice(1:2) %>% 
+  mutate(diff = lead(closest_low, 1) - closest_low,
+         diff_50 = 50 - closest_low,
+         diff_divide = diff_50/diff,
+         low = diff_divide * income_diff,
+         median_income = low + income_high) %>% 
+  select(SA2_NAME, median_income) %>% 
+  slice(1)
+```
+
+# Calculate Median Rent in each SA2
+```{r}
+colnames(abs_rents)
+
+# new column with rent low and high
+med_rent <- abs_rents %>%
+  # pivot_longer to create new columns
+  pivot_longer(cols = -SA2_NAME, names_to = "Rent", values_to = "Count") %>% 
+  mutate(rent_low = ifelse(Rent == "$1-$74", 1,
+                           ifelse(Rent == "$75-$99", 75, 
+                                  ifelse(Rent == "$100-$124", 100,
+                                         ifelse(Rent == "$125-$149", 125, 
+                                                ifelse(Rent == "$150-$174", 150, 
+                                                       ifelse(Rent == "$175-$199", 175, 
+                                                              ifelse(Rent == "$200-$224", 200, 
+                                                                     ifelse(Rent == "$225-$249", 225, 
+                                                                            ifelse(Rent == "$250-$274", 250, 
+                                                                                   ifelse(Rent == "$275-$299", 275, 
+                                                                                          ifelse(Rent == "$300-$324", 300, 
+                                                                                                 ifelse(Rent == "$325-$349", 325, 
+                                                                                                        ifelse(Rent == "$350-$374", 350,
+                                                                                                               ifelse(Rent == "$375-$399", 375, 
+                                                                                                                      ifelse(Rent == "$400-$424", 400, 
+                                                                                                                             ifelse(Rent == "$425-$449", 425, 
+                                                                                                                                    ifelse(Rent == "$450-$474", 450, 
+                                                                                                                                           ifelse(Rent == "$475-$499", 475, 
+                                                                                                                                                  ifelse(Rent == "$500-$524", 500, 
+                                                                                                                                                         ifelse(Rent == "$525-$549", 525, 
+                                                                                                                                                                ifelse(Rent == "$550-$649", 550, 
+                                                                                                                                                                       ifelse(Rent == "$650-$749", 650,
+                                                                                                                                                                              ifelse(Rent == "$750-$849", 750, 
+                                                                                                                                                                                     ifelse(Rent == "$850-$949", 850, 
+                                                                                                                                                                                            ifelse(Rent == "$950 and over", 950, 0)))))))))))))))))))))))))) %>% 
+  mutate(rent_high = ifelse(Rent == "$1-$74", 74,
+                            ifelse(Rent == "$75-$99", 99, 
+                                   ifelse(Rent == "$100-$124", 124,
+                                          ifelse(Rent == "$125-$149", 149, 
+                                                 ifelse(Rent == "$150-$174", 174, 
+                                                        ifelse(Rent == "$175-$199", 199, 
+                                                               ifelse(Rent == "$200-$224", 224, 
+                                                                      ifelse(Rent == "$225-$249", 249, 
+                                                                             ifelse(Rent == "$250-$274", 274, 
+                                                                                    ifelse(Rent == "$275-$299", 299, 
+                                                                                           ifelse(Rent == "$300-$324", 324, 
+                                                                                                  ifelse(Rent == "$325-$349", 349, 
+                                                                                                         ifelse(Rent == "$350-$374", 374,
+                                                                                                                ifelse(Rent == "$375-$399", 399, 
+                                                                                                                       ifelse(Rent == "$400-$424", 424, 
+                                                                                                                              ifelse(Rent == "$425-$449", 449, 
+                                                                                                                                     ifelse(Rent == "$450-$474", 474, 
+                                                                                                                                            ifelse(Rent == "$475-$499", 499, 
+                                                                                                                                                   ifelse(Rent == "$500-$524", 524, 
+                                                                                                                                                          ifelse(Rent == "$525-$549", 549, 
+                                                                                                                                                                 ifelse(Rent == "$550-$649", 649, 
+                                                                                                                                                                        ifelse(Rent == "$650-$749", 749,
+                                                                                                                                                                               ifelse(Rent == "$750-$849", 849, 
+                                                                                                                                                                                      ifelse(Rent == "$850-$949", 949, 
+                                                                                                                                                                                             ifelse(Rent == "$950 and over", 1000, 0)))))))))))))))))))))))))) %>% 
+  mutate(rent_diff = rent_high - rent_low) %>% 
+  filter(Rent != "Not stated",
+         Rent != "Not applicable",
+         Rent != "Overseas visitor") %>% 
+  select(SA2_NAME, Rent, rent_low, rent_high, rent_diff, Count) %>% 
+  arrange(SA2_NAME) %>%
+  # group by SA2_NAME and calculate total as column
+  group_by(SA2_NAME) %>%
+  mutate(total = sum(Count),
+         perc = Count/total *100) %>% 
+  # get cumulative sum of perc
+  mutate(cumsum = cumsum(perc)) %>% 
+  # for each SA2_NAME, mutate new column where cumsum contains or is closest to 50
+  mutate(closest_50 = ifelse(cumsum >= 50, cumsum, NA)) %>%
+  # mutate new column with Rent from row after closest_50
+  mutate(closest_low = ifelse(lead(closest_50, 1) >= 50, cumsum, NA)) %>%
+  # for each suburb, slice first two rows after NA in closest_low
+  filter(!is.na(closest_low)) %>%
+  slice(1:2) %>%
+  mutate(diff = lead(closest_low, 1) - closest_low,
+         diff_50 = 50 - closest_low,
+         diff_divide = diff_50/diff,
+         low = diff_divide * rent_diff,
+         median_rent = low + rent_high) %>% 
+  select(SA2_NAME, median_rent) %>% 
+  slice(1)
+
+# median rents across all sa2
+ median(med_rent$median_rent, na.rm = TRUE)
+
+
+
+```
+# calculate labour force participation rate in each SA2
+```{r}
+# Create new column, with labour force participation rate
+labour_force <- abs_labourforce %>% 
+  mutate(Employed = `Employed, worked full-time` + 
+           `Employed, worked part-time` + `Employed, away from work`,
+         Unemployed = `Unemployed, looking for full-time work` + 
+           `Unemployed, looking for part-time work` + `Not in the labour force`) %>% 
+  select(SA2_NAME, Employed, Unemployed)
+```
+
+# total households per sa2
+```{r}
+total_households <- abs_NoHouseholds %>% 
+  select(SA2_NAME, NoHouseholds) %>% 
+  rename(Total_Households = NoHouseholds) %>% 
+  arrange(SA2_NAME)
+
+```
+
+# Social and affordable housing
+```{r}
+# boarding houses
+boarding_houses <- abs_boardinghouses %>% 
+  # calculate sum of boarding houses, sum of column 2 to 4
+  mutate(`Boarding House` = `Hostel for the disabled` + 
+           `Boarding house, private hotel` + 
+           `Hostel for homeless, night shelter, refuge`) %>%
+  select(SA2_NAME, `Boarding House`) %>% 
+  arrange(SA2_NAME)
+
+# residential parks
+residential_parks <- abs_resiparks %>% 
+  mutate(`Residential Park` = `Caravan/residential park or camping ground` + 
+           `Manufactured home estate`) %>%
+  select(SA2_NAME, `Residential Park`) %>%
+  arrange(SA2_NAME)
+
+# social housing
+social_housing <- abs_socialhousing %>% 
+  mutate(`Social Housing` = `Community housing provider` + 
+           `State or territory housing authority`) %>%
+  select(SA2_NAME, `Social Housing`) %>%
+  arrange(SA2_NAME)
+```
+
+# Number of Cars
+```{r}
+# number of cars
+no_cars <- abs_cars %>% 
+  # from column 2 to 32, multiply the row value by increasing column number starting from 0
+  mutate(M0 = 0 * `No motor vehicles`,
+         M1 = 1 * `1 motor vehicle`,
+         M2 = 2 * `2 motor vehicles`,
+         M3 = 3 * `3 motor vehicles`,
+         M4 = 4 * `4 motor vehicles`,
+         M5 = 5 * `5 motor vehicles`,
+         M6 = 6 * `6 motor vehicles`,
+         M7 = 7 * `7 motor vehicles`,
+         M8 = 8 * `8 motor vehicles`,
+         M9 = 9 * `9 motor vehicles`,
+         M10 = 10 * `10 motor vehicles`,
+         M11 = 11 * `11 motor vehicles`,
+         M12 = 12 * `12 motor vehicles`,
+         M13 = 13 * `13 motor vehicles`,
+         M14 = 14 * `14 motor vehicles`,
+         M15 = 15 * `15 motor vehicles`,
+         M16 = 16 * `16 motor vehicles`,
+         M17 = 17 * `17 motor vehicles`,
+         M18 = 18 * `18 motor vehicles`,
+         M19 = 19 * `19 motor vehicles`,
+         M20 = 20 * `20 motor vehicles`,
+         M21 = 21 * `21 motor vehicles`,
+         M22 = 22 * `22 motor vehicles`,
+         M23 = 23 * `23 motor vehicles`,
+         M24 = 24 * `24 motor vehicles`,
+         M25 = 25 * `25 motor vehicles`,
+         M26 = 26 * `26 motor vehicles`,
+         M27 = 27 * `27 motor vehicles`,
+         M28 = 28 * `28 motor vehicles`,
+         M29 = 29 * `29 motor vehicles`,
+         M30 = 30 * `30 or more motor vehicles`) %>% 
+  # calculate total of M0 to M30
+  mutate(NoCars = rowSums(.[35:65])) %>% 
+  select(SA2_NAME, NoCars) %>% 
+  arrange(SA2_NAME)
+```
+
+# rent stress
+```{r}
+rent_stress <- abs_rentstress %>% 
+  mutate(Total_Renters = rowSums(.[2:5]),
+         Rent_stress = `Households where rent payments are more than 30% of household income`,
+         Rent_stress_P = (Rent_stress/Total_Renters) * 100) %>% 
+  select(SA2_NAME, Rent_stress, Total_Renters, Rent_stress_P)
+```
+
+
+# merge into one
+```{r}
+# 2 significant figures
+options(digits = 1)
+
+# Merge all data into one
+census <- med_age %>% 
+  left_join(total_households, by = "SA2_NAME") %>%
+  left_join(med_income, by = "SA2_NAME") %>%
+  left_join(dwelling_types, by = "SA2_NAME") %>%
+  left_join(housing_need, by = "SA2_NAME") %>%
+  left_join(trans_mode, by = "SA2_NAME") %>% 
+  left_join(med_rent, by = "SA2_NAME") %>%
+  left_join(labour_force, by = "SA2_NAME") %>% 
+  left_join(boarding_houses, by = "SA2_NAME") %>%
+  left_join(residential_parks, by = "SA2_NAME") %>%
+  left_join(social_housing, by = "SA2_NAME") %>%
+  left_join(no_cars, by = "SA2_NAME") %>%
+  left_join(rent_stress, by = "SA2_NAME") %>%
+  arrange(SA2_NAME)
+```
+
+Read geojson
+```{r}
+shelf(tmap)
+tmap_mode('view')
+
+# cadastres
+cadastres <- st_read("./Data/Cadastre/cadastres_full.shp")
+
+# SA2 Shapefiles
+sa2_shape <- st_read("./Data/Boundaries/SA2 Boundaries/SA2_2021_AUST_GDA2020.shp") %>% 
+  select(SA2_NAME21, geometry)
+
+```
+
+__________________________________________________________________________________
+
+Current land-use diversity and suitability
+Distribution of land-use types
+-	Distribution of land-use type around TOD sites (400, 800, and 1,200 m)
+```{r}
+
+```
+Distribution of residential lot types
+- Distribution of R1, R2, R3 and R4 (including MU1, SP5, and B4) 
+```{r}
+
+```
+Dwelling type distribution
+-
+```{r}
+sa2_shape %>% 
+  right_join(census, by = c("SA2_NAME21" = "SA2_NAME")) %>% 
+  st_transform(st_crs(priority_zones)) %>%
+  st_intersection(priority_zones %>% st_buffer(800)) %>% 
+  group_by(name, SA2_) %>% 
+  summarise(Houses = mean(Houses_P, na.rm = TRUE),
+            `Semi-detached` = mean(Semi.detached_P, na.rm = TRUE),
+            `Low-density Apartments` = mean(`Low.density.Apartments_P`, na.rm = TRUE),
+            `Medium-density Apartments` = mean(`Medium.density.Apartments_P`, na.rm = TRUE),
+            `High-density Apartments` = mean(`High.density.Apartments_P`, na.rm = TRUE))
+```
+
+Housing adequacy
+- Distribution of needed extra bedrooms
+```{r}
+options(digits = 4)
+
+sa2_shape %>% 
+  right_join(census, by = c("SA2_NAME21" = "SA2_NAME")) %>% 
+  st_transform(st_crs(priority_zones)) %>%
+  st_intersection(priority_zones %>% st_buffer(800)) %>% 
+  group_by(name) %>% 
+  summarise(HN0P = mean(HN0P, na.rm = TRUE),
+            HN1P = mean(HN1P, na.rm = TRUE),
+            HN2P = mean(HN2P, na.rm = TRUE),
+            HN3P = mean(HN3P, na.rm = TRUE),
+            HN4P = mean(HN4P, na.rm = TRUE))
+
+```
+
+Accessibility and Mobility
+Distribution of commuting modalities
+```{r}
+options(digits = 4)
+
+sa2_shape %>% 
+  right_join(census, by = c("SA2_NAME21" = "SA2_NAME")) %>% 
+  st_transform(st_crs(priority_zones)) %>%
+  st_intersection(priority_zones %>% st_buffer(800)) %>% 
+  group_by(name, SA2_NAME21) %>% 
+  summarise(Train = mean(Train_P, na.rm = TRUE),
+            Bus = mean(Bus_P, na.rm = TRUE),
+            Ferry = mean(Ferry_P, na.rm = TRUE),
+            Tram = mean(Tram_P, na.rm = TRUE),
+            `Personal Vehicle` = mean(`Personal.Vehicle_P`, na.rm = TRUE),
+            `Active Transport` = mean(`Active.Transport_P`, na.rm = TRUE),
+            `WfH` = mean(`WfH_P`, na.rm = TRUE))
+
+
+```
+
+Distribution of cars owned per household
+```{r}
+options(digits = 4)
+
+sa2_shape %>% 
+  right_join(census, by = c("SA2_NAME21" = "SA2_NAME")) %>% 
+  mutate(cars_per_household = NoCars/Total_Households) %>%
+  st_transform(st_crs(priority_zones)) %>%
+  st_intersection(priority_zones %>% st_buffer(800)) %>% 
+  group_by(name, SA2_NAME21) %>% 
+  summarise(cars_per_household = mean(cars_per_household, na.rm = TRUE))
+
+# state average of cars per household
+census %>% 
+  summarise(mean(NoCars/Total_Households, na.rm = TRUE))
+
+```
+
+Proximity to public transport infrastructure
+# count of bus stops, train stations, and light rail stops within 400, 800, and 1,200 m of priority_zones
+```{r}
+# merge all transport stops, naming the type of stops
+all_stops <- rbind(bus_stops %>% mutate(type = "Bus"),
+                   train_stations %>% mutate(type = "Train"),
+                   metro_stations %>% mutate(type = "Metro"),
+                   ferry_stations %>% mutate(type = "Ferry"),
+                   lightrail_stops %>% mutate(type = "Light Rail"))
+
+# count of bus stops, train stations, and light rail stops within 400, 800, and 1,200 meters of priority_zones
+# 400m
+st_join(priority_zones, all_stops, join = st_is_within_distance, dist = 400) %>% 
+  group_by(id, name, type) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = type, values_from = n, values_fill = 0) %>% 
+  ungroup() %>% 
+  select(-id)
+
+# 800m
+st_join(priority_zones, all_stops, join = st_is_within_distance, dist = 800) %>%
+  group_by(id, name, type) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = type, values_from = n, values_fill = 0) %>% 
+  ungroup() %>% 
+  select(-id)
+
+# 1200m
+st_join(priority_zones, all_stops, join = st_is_within_distance, dist = 1200) %>%
+  group_by(id, name, type) %>% 
+  summarise(n = n()) %>% 
+  pivot_wider(names_from = type, values_from = n, values_fill = 0) %>% 
+  ungroup() %>% 
+  select(-id)
+
+
+# save all stops
+write_sf(all_stops, "./Data/all_stops.shp")
+```
+
+
+
+Housing and Rental Affordability
+# Median Rent of SA2 around 1200m of priority zones
+```{r}
+sa2_shape %>% 
+  right_join(census, by = c("SA2_NAME21" = "SA2_NAME")) %>% 
+  st_transform(st_crs(priority_zones)) %>%
+  st_intersection(priority_zones %>% st_buffer(800)) %>% 
+  group_by(name) %>% 
+  summarise(median_rent = median(median_rent, na.rm = TRUE))
+
+```
+
+Rent Stress per SA2
+```{r}
+sa2_shape %>% 
+  right_join(census, by = c("SA2_NAME21" = "SA2_NAME")) %>% 
+  st_transform(st_crs(priority_zones)) %>%
+  st_intersection(priority_zones %>% st_buffer(800)) %>% 
+  group_by(name, SA2_NAME21) %>% 
+  summarise(Rent_stress_P = mean(Rent_stress_P, na.rm = TRUE))
+
+
+```
+
+Distribution of social housing mix
+```{r}
+# total social housing, boarding houses, and residential parks per SA2
+census %>% 
+  select(SA2_NAME, `Social Housing`, `Boarding House`, `Residential Park`) %>% 
+  arrange(SA2_NAME) %>% 
+  # group by SA2_NAME and calculate total as column
+  group_by(SA2_NAME) %>%
+  summarise(total_social_housing = sum(`Social Housing`),
+            total_boarding_houses = sum(`Boarding House`),
+            total_residential_parks = sum(`Residential Park`)) %>%
+  ungroup() %>% 
+  left_join(sa2_shape, by = c("SA2_NAME" = "SA2_NAME21")) %>% 
+  st_as_sf() %>%
+  st_transform(st_crs(priority_zones)) %>%
+  st_intersection(priority_zones %>% st_buffer(800)) %>%
+  group_by(name, SA2_NAME) %>%
+  summarise(total_social_housing = sum(total_social_housing, na.rm = TRUE),
+            total_boarding_houses = sum(total_boarding_houses, na.rm = TRUE),
+            total_residential_parks = sum(total_residential_parks, na.rm = TRUE))
+
+```
